@@ -2,15 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Tenant Domain Lookup (CORS Proxy)</title>
+  <title>M365 Tenant Discovery Tool</title>
   <style>
-    body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; }
+    body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 1rem; }
     input, button { padding: 0.5rem; font-size: 1rem; }
-    pre { background: #f4f4f4; padding: 1rem; border-radius: 5px; white-space: pre-wrap; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 5px; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
-  <h2>🔍 M365 Tenant Domain Lookup (via CORS Proxy)</h2>
+  <h2>🔍 M365 Tenant Discovery Tool</h2>
   <input id="domainInput" type="text" placeholder="example.com" />
   <button onclick="lookup()">Lookup</button>
   <h3>Result:</h3>
@@ -22,70 +22,97 @@
       const output = document.getElementById("output");
       if (!domain) return alert("Please enter a domain.");
 
-      const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
-        <soap:Envelope xmlns:exm="http://schemas.microsoft.com/exchange/services/2006/messages"
-          xmlns:ext="http://schemas.microsoft.com/exchange/services/2006/types"
-          xmlns:a="http://www.w3.org/2005/08/addressing"
-          xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
-          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-          <soap:Header>
-            <a:RequestedServerVersion>Exchange2010</a:RequestedServerVersion>
-            <a:MessageID>urn:uuid:12345678-1234-1234-1234-123456789000</a:MessageID>
-            <a:Action soap:mustUnderstand="1">http://schemas.microsoft.com/exchange/2010/Autodiscover/Autodiscover/GetFederationInformation</a:Action>
-            <a:To soap:mustUnderstand="1">https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc</a:To>
-            <a:ReplyTo><a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address></a:ReplyTo>
-          </soap:Header>
-          <soap:Body>
-            <GetFederationInformationRequestMessage xmlns="http://schemas.microsoft.com/exchange/2010/Autodiscover">
-              <Request><Domain>${domain}</Domain></Request>
-            </GetFederationInformationRequestMessage>
-          </soap:Body>
-        </soap:Envelope>`;
+      output.textContent = "⏳ Looking up tenant info...";
 
-      output.textContent = "Fetching data from Microsoft via CORS proxy...";
+      let tenantId = null;
+      let tenantDomain = null;
+      let userrealmData = {};
+      let autodiscoverDomains = [];
 
-      const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent("https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc");
-
+      // Step 1: Get Tenant ID from OpenID config
       try {
-        const response = await fetch(proxyUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "text/xml; charset=utf-8",
-            "User-Agent": "AutodiscoverClient"
-          },
-          body: soapEnvelope
-        });
-
-        const text = await response.text();
-        const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(text, "application/xml");
-
-        const domains = [...xmlDoc.getElementsByTagNameNS("*", "Domain")].map(el => el.textContent);
-        const tenantDomain = domains.find(d => d.includes("onmicrosoft.com"));
-        const tenantName = tenantDomain ? tenantDomain.split(".")[0] : null;
-
-        let tenantId = null;
-        if (tenantName) {
-          try {
-            const openidResp = await fetch(`https://login.microsoftonline.com/${tenantName}.onmicrosoft.com/v2.0/.well-known/openid-configuration`);
-            const openidData = await openidResp.json();
-            const tokenEndpoint = openidData.token_endpoint;
-            tenantId = tokenEndpoint.split("/")[3];
-          } catch (e) {
-            tenantId = "Could not retrieve";
-          }
-        }
-
-        output.textContent = JSON.stringify({
-          input_domain: domain,
-          domains: domains,
-          tenant: tenantName || "Not found",
-          tenant_id: tenantId || "Not found"
-        }, null, 2);
-
+        const openidRes = await fetch(`https://login.microsoftonline.com/${domain}/.well-known/openid-configuration`);
+        const openidData = await openidRes.json();
+        const tokenEndpoint = openidData.token_endpoint;
+        tenantId = tokenEndpoint.split("/")[3];
+        tenantDomain = `${tenantId}.onmicrosoft.com`;
       } catch (err) {
-        output.textContent = `❌ Error:\n${err.message}`;
+        tenantId = null;
       }
+
+      // Step 2: Get federation status from userrealm
+      try {
+        const realmRes = await fetch(`https://login.microsoftonline.com/common/userrealm?user=admin@${domain}`);
+        userrealmData = await realmRes.json();
+        if (userrealmData.NameSpaceType === "Managed") {
+          tenantDomain = `${userrealmData.DomainName || domain}`; // fallback
+        }
+      } catch (err) {
+        userrealmData = { error: "Could not fetch userrealm" };
+      }
+
+      // Step 3: Try autodiscover with original and fallback domain
+      const domainsToTry = [domain];
+      if (tenantDomain && tenantDomain !== domain) domainsToTry.push(tenantDomain);
+
+      for (let d of domainsToTry) {
+        try {
+          const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
+            <soap:Envelope xmlns:exm="http://schemas.microsoft.com/exchange/services/2006/messages"
+              xmlns:ext="http://schemas.microsoft.com/exchange/services/2006/types"
+              xmlns:a="http://www.w3.org/2005/08/addressing"
+              xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+              <soap:Header>
+                <a:RequestedServerVersion>Exchange2010</a:RequestedServerVersion>
+                <a:MessageID>urn:uuid:12345678-1234-1234-1234-123456789000</a:MessageID>
+                <a:Action soap:mustUnderstand="1">http://schemas.microsoft.com/exchange/2010/Autodiscover/Autodiscover/GetFederationInformation</a:Action>
+                <a:To soap:mustUnderstand="1">https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc</a:To>
+                <a:ReplyTo><a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address></a:ReplyTo>
+              </soap:Header>
+              <soap:Body>
+                <GetFederationInformationRequestMessage xmlns="http://schemas.microsoft.com/exchange/2010/Autodiscover">
+                  <Request><Domain>${d}</Domain></Request>
+                </GetFederationInformationRequestMessage>
+              </soap:Body>
+            </soap:Envelope>`;
+
+          const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent("https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc");
+
+          const response = await fetch(proxyUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "text/xml; charset=utf-8",
+              "User-Agent": "AutodiscoverClient"
+            },
+            body: soapEnvelope
+          });
+
+          const text = await response.text();
+          const parser = new DOMParser();
+          const xmlDoc = parser.parseFromString(text, "application/xml");
+          const found = [...xmlDoc.getElementsByTagNameNS("*", "Domain")].map(el => el.textContent);
+          if (found.length > 0) {
+            autodiscoverDomains = [...new Set([...autodiscoverDomains, ...found])];
+          }
+        } catch (err) {
+          // continue silently
+        }
+      }
+
+      // Show results
+      const results = {
+        input_domain: domain,
+        tenant_id: tenantId || "Not found",
+        federation_info: {
+          name_space_type: userrealmData.NameSpaceType || "unknown",
+          brand_name: userrealmData.FederationBrandName || "unknown",
+          is_federated: userrealmData.IsFederated ?? "unknown"
+        },
+        autodiscover_domains: autodiscoverDomains.length > 0 ? autodiscoverDomains : ["None found"]
+      };
+
+      output.textContent = JSON.stringify(results, null, 2);
     }
   </script>
 </body>
