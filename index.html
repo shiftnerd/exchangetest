@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Microsoft 365 Domain Lookup</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 700px;
+      margin: 2rem auto;
+      padding: 1rem;
+    }
+    input, button {
+      font-size: 1rem;
+      padding: 0.5rem;
+      margin-right: 0.5rem;
+    }
+    pre {
+      background: #f4f4f4;
+      padding: 1rem;
+      border-radius: 5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <h2>🔍 M365 Tenant Domain Lookup</h2>
+  <input type="text" id="domainInput" placeholder="example.com" />
+  <button onclick="lookup()">Lookup</button>
+
+  <h3>Result:</h3>
+  <pre id="output">Waiting for input...</pre>
+
+  <script>
+    async function lookup() {
+      const domain = document.getElementById("domainInput").value.trim();
+      if (!domain) return alert("Please enter a domain.");
+
+      const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
+      <soap:Envelope xmlns:exm="http://schemas.microsoft.com/exchange/services/2006/messages"
+        xmlns:ext="http://schemas.microsoft.com/exchange/services/2006/types"
+        xmlns:a="http://www.w3.org/2005/08/addressing"
+        xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+        <soap:Header>
+          <a:RequestedServerVersion>Exchange2010</a:RequestedServerVersion>
+          <a:MessageID>urn:uuid:12345678-1234-1234-1234-123456789000</a:MessageID>
+          <a:Action soap:mustUnderstand="1">http://schemas.microsoft.com/exchange/2010/Autodiscover/Autodiscover/GetFederationInformation</a:Action>
+          <a:To soap:mustUnderstand="1">https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc</a:To>
+          <a:ReplyTo><a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address></a:ReplyTo>
+        </soap:Header>
+        <soap:Body>
+          <GetFederationInformationRequestMessage xmlns="http://schemas.microsoft.com/exchange/2010/Autodiscover">
+            <Request><Domain>${domain}</Domain></Request>
+          </GetFederationInformationRequestMessage>
+        </soap:Body>
+      </soap:Envelope>`;
+
+      document.getElementById("output").textContent = "Requesting info...";
+
+      try {
+        const response = await fetch("https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc", {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/xml; charset=utf-8",
+            "User-Agent": "AutodiscoverClient"
+          },
+          body: soapEnvelope
+        });
+
+        const text = await response.text();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(text, "application/xml");
+
+        const domains = [...xmlDoc.getElementsByTagNameNS("*", "Domain")].map(el => el.textContent);
+        const tenantDomain = domains.find(d => d.includes("onmicrosoft.com"));
+        const tenantName = tenantDomain ? tenantDomain.split(".")[0] : null;
+
+        let tenantId = null;
+        if (tenantName) {
+          try {
+            const openidResp = await fetch(`https://login.microsoftonline.com/${tenantName}.onmicrosoft.com/v2.0/.well-known/openid-configuration`);
+            const openidData = await openidResp.json();
+            const tokenEndpoint = openidData.token_endpoint;
+            tenantId = tokenEndpoint.split("/")[3];
+          } catch (e) {
+            tenantId = "Not found";
+          }
+        }
+
+        const result = {
+          input_domain: domain,
+          domains: domains,
+          tenant: tenantName || "Not found",
+          tenant_id: tenantId || "Not found"
+        };
+
+        document.getElementById("output").textContent = JSON.stringify(result, null, 2);
+      } catch (error) {
+        document.getElementById("output").textContent = `❌ Error: ${error.message}`;
+      }
+    }
+  </script>
+</body>
+</html>
